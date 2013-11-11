@@ -48,8 +48,9 @@ _conf = {
     "maxD1": 1.5e-9,    # s
     "maxD2": 400e-9,    # s
 
-    "stepping": 10e-10, # s
+    "stepping": 1e-9,  # s
 
+    "enableSaving": True,
     "directory": "asic_data_{time:.0f}ms/",  # include trailing slash!
     "filename": {
         "stats": "ch{channel:d}_DOT.dat",
@@ -59,6 +60,7 @@ _conf = {
         "DOE": "ch{channel:d}_DOE.dat"
     }
 }
+_currentStatusOutput = []
 
 
 # thread pool stuff
@@ -70,16 +72,17 @@ _maxThreads = cpu_count()
 
 class Worker(Thread):
     """Thread executing tasks from a given tasks queue"""
-    def __init__(self, tasks):
+    def __init__(self, tasks, id):
         Thread.__init__(self)
         self.tasks = tasks
         self.daemon = True
+        self.name = id
         self.start()
 
     def run(self):
         while True:
             func, args, kargs = self.tasks.get()
-            try: func(*args, **kargs)
+            try: func(self.name, *args, **kargs)
             except Exception, e: print e
             self.tasks.task_done()
 
@@ -88,7 +91,8 @@ class ThreadPool:
     """Pool of threads consuming tasks from a queue"""
     def __init__(self, num_threads):
         self.tasks = Queue(num_threads)
-        for _ in range(num_threads): Worker(self.tasks)
+        for i in range(num_threads):
+            Worker(self.tasks, i)
 
     def add_task(self, func, *args, **kargs):
         """Add a task to the queue"""
@@ -108,8 +112,8 @@ class ThreadPool:
 class Signal:
     def __init__(self, nSteps):
         self._blockSize = 2048
-        self._nSteps = nSteps
-        self._nBlocks = int(nSteps / self._blockSize) + 1
+        self._nSteps = long(nSteps)
+        self._nBlocks = long(nSteps / self._blockSize) + 1
         self._data = [None]*self._nBlocks
         self._nEvents = 0
 
@@ -168,7 +172,7 @@ class Signal:
 
     def searchNextFrom(self, i, thr):
         if 0 <= i < self._nSteps:
-            iBlock = int(i / self._blockSize)
+            iBlock = long(i / self._blockSize)
             iSlot = i % self._blockSize   # slot inside block
 
             while iBlock < self._nBlocks:
@@ -201,12 +205,11 @@ def addEvent(signal, t0, height):
     #           x ** (alpha - 1) * math.exp(-x / beta)
     # pdf(x) =  --------------------------------------
     #             math.gamma(alpha) * beta ** alpha
-    alpha = 3.0
-    iBin0 = int(t0 / _conf['stepping'])
+    iBin0 = long(t0 / _conf['stepping'])
     iBin = iBin0
 
     while True:
-        t = (iBin - iBin0) * _conf['stepping']    # t in s
+        t = float(iBin - iBin0) * _conf['stepping']    # t in s
         x = t * 1e9 / height
         currentValue = height * 25 * x**2 * math.exp(-x)
 
@@ -227,11 +230,16 @@ def addEvent(signal, t0, height):
     return t
 
 
-def generateTrues(signal, runTime):
-    global _conf
-    t = 0
+def generateTrues(threadID, signal, runTime):
+    global _conf, _currentStatusOutput
+    t = float(0)
     while True:
         t_wait = random.gammavariate(1.0, 1/_conf['eventRate'])
+
+        progress = int(round(t / runTime * 100))
+        if progress > _currentStatusOutput[threadID]['%']:
+            _currentStatusOutput[threadID]['%'] = progress
+            time.sleep(0.001)   # give the output some time to print
 
         # time of the next event
         t_next = t + t_wait
@@ -249,33 +257,41 @@ def generateTrues(signal, runTime):
         t += t_wait
 
 
-def getDiscriminatorOutput(signal, channel):
-    global _conf
+def getDiscriminatorOutput(threadID, signal, channel):
+    global _conf, _currentStatusOutput
 
     filenameDOT = _conf['directory'] + _conf['filename']['DOT'].format(channel=int(channel))
     filenameDOE = _conf['directory'] + _conf['filename']['DOE'].format(channel=int(channel))
 
-    fileDOT = file(filenameDOT, 'w')
-    fileDOE = file(filenameDOE, 'w')
+    if _conf['enableSaving']:
+        fileDOT = file(filenameDOT, 'w')
+        fileDOE = file(filenameDOE, 'w')
 
-    i = 0
+    i = long(0)
     t_lastToggleDOT = 0
     t_lastToggleDOE = 0
     lastDOT = False
     lastDOE = False
 
     while i < signal.getSteps():
-        t_ps = int(round(i * _conf['stepping'] * 1e12))   # t in ps
+        progress = int(round(float(i) / signal.getSteps() * 100))
+        if progress > _currentStatusOutput[threadID]['%']:
+            _currentStatusOutput[threadID]['%'] = progress
+            time.sleep(0.001)   # give the output some time to print
+
+        t_ps = long(round(i * _conf['stepping'] * 1e12))   # t in ps
         voltage = signal.getValue(i)
         DOT = voltage >= _conf['tThreshold']
         DOE = voltage >= _conf['eThreshold']
 
         # DOx toggled
         if lastDOT != DOT:
-            fileDOT.write("{0:012d}\n".format(t_ps - t_lastToggleDOT))
+            if _conf['enableSaving']:
+                fileDOT.write("{0:012d}\n".format(t_ps - t_lastToggleDOT))
             t_lastToggleDOT = t_ps
         if lastDOE != DOE:
-            fileDOE.write("{0:012d}\n".format(t_ps - t_lastToggleDOE))
+            if _conf['enableSaving']:
+                fileDOE.write("{0:012d}\n".format(t_ps - t_lastToggleDOE))
             t_lastToggleDOE = t_ps
 
         lastDOT = DOT
@@ -291,25 +307,82 @@ def getDiscriminatorOutput(signal, channel):
         else:
             i += 1
 
-    fileDOT.close()
-    fileDOE.close()
+    if _conf['enableSaving']:
+        fileDOT.close()
+        fileDOE.close()
 
 
 # the actual generation of the events
-def generateChannelEvents(runTime, channel):
-    global _conf
+def generateChannelEvents(threadID, runTime, channel):
+    global _conf, _currentStatusOutput
+
+    threadID = int(threadID)
+    _currentStatusOutput[threadID]['ch'] = channel
 
     # init the signal objects
-    nSteps = int((runTime + 1e-6)/_conf['stepping'])
+    nSteps = long((runTime + 1e-6)/_conf['stepping'])
     discInput = Signal(nSteps)
 
     # generate the true hits
-    generateTrues(discInput, runTime)
+    _currentStatusOutput[threadID]['%'] = 0
+    _currentStatusOutput[threadID]['step'] = 1
+    generateTrues(threadID, discInput, runTime)
 
     # get the discriminator output
-    getDiscriminatorOutput(discInput, channel)
+    _currentStatusOutput[threadID]['%'] = 0
+    _currentStatusOutput[threadID]['step'] = 2
+    getDiscriminatorOutput(threadID, discInput, channel)
 
-    print "channel {0:2d}   generated Events: {1}".format(channel, discInput.getEvents())
+    # print "channel {0:2d}   generated Events: {1}".format(channel, discInput.getEvents())
+
+
+# Keep the status output up to date
+def updateStatus():
+    while True:
+        printStatus()
+        time.sleep(0.03)
+
+
+# Print some status information to the command line
+def printStatus(lastOutput=False):
+    global _conf, _currentStatusOutput
+
+    line = ""
+    for i in range(len(_currentStatusOutput)):
+        v = _currentStatusOutput[i]
+        if v['ch'] < 0:
+            line += " "*13 + "|"
+        else:
+            line += " ch{0:02d} {1:d} {2:3d}% |".format(v['ch'], v['step'], v['%'])
+
+    if lastOutput:
+        sys.stdout.write(line[:-1])
+    else:
+        sys.stdout.write(line[:-1] + '\r')
+    sys.stdout.flush()
+
+
+def printHeader():
+    global _conf, _nThreads, _runTime
+
+    # some general description
+    print "Generating events for {0:.0f} ms with a stepping of {1:.1e} s.\n".format(_runTime*1000, _conf['stepping'])
+    print "Status output for each task:"
+    print "  1) channel number (ch##)"
+    print "  2) step in generation"
+    print "     1: generate true events"
+    print "     2: generate dark events"
+    print "     3: locate DOT/DOE toggle points"
+    print "  3) percentage of process in current step\n"
+    print "Event generation starts...\n"
+
+    # initialize the status output
+    statusOutputHeadline = ""
+    for t in range(_nThreads):
+        statusOutputHeadline += "   task {0:2d}   |".format(t)
+        _currentStatusOutput.append({'ch': -1, '%': 0.0})
+    print statusOutputHeadline[:-3]
+    print (("-"*13 + "+")*_nThreads)[:-1]
 
 
 # How the program is intended to use
@@ -326,11 +399,12 @@ def printUsage():
 # the main function
 def main():
     global _conf, _runTime, _nThreads, _maxThreads, _nChannels
+    global _currentStatusOutput
 
     if 2 <= len(sys.argv) <= 3:
         if len(sys.argv) >= 3:
             if int(sys.argv[2]) > 0:
-                _nThreads = int(sys.argv[3])
+                _nThreads = int(sys.argv[2])
 
         _runTime = float(sys.argv[1])
     else:
@@ -338,12 +412,18 @@ def main():
         sys.exit()
 
     _conf['directory'] = _conf['directory'].format(time=_runTime*1000)
-    if not os.path.exists(_conf['directory']):
+    if not os.path.exists(_conf['directory']) and _conf['enableSaving']:
         os.makedirs(_conf['directory'])
 
     # check number of threads
     if _nThreads == 0 or _nThreads > _maxThreads:
         _nThreads = _maxThreads
+
+    # information for the user
+    printHeader()
+    # statusThread = Thread(target=updateStatus)
+    # statusThread.daemon = True
+    # statusThread.start()
 
     # 1) Init a Thread pool with the desired number of threads
     pool = ThreadPool(_nThreads)
@@ -354,6 +434,8 @@ def main():
 
     # 3) Wait for completion
     pool.wait_completion()
+
+    print "\n\nEverything done!"
 
 
 if __name__ == '__main__':
