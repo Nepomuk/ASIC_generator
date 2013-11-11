@@ -48,7 +48,7 @@ _conf = {
     "maxD1": 1.5e-9,    # s
     "maxD2": 400e-9,    # s
 
-    "stepping": 1e-9,  # s
+    "stepping": 1e-11,  # s
 
     "enableSaving": True,
     "directory": "asic_data_{time:.0f}ms/",  # include trailing slash!
@@ -219,7 +219,7 @@ def addEvent(signal, t0, height):
 
         iBin += 1
         # regular stop criterium
-        if (iBin - iBin0) > 10 and currentValue < _conf['tThreshold']:
+        if t > 1e-9 and currentValue < _conf['tThreshold']:
             break
 
         # pulses longer than 1 us don't make sense
@@ -421,9 +421,9 @@ def main():
 
     # information for the user
     printHeader()
-    # statusThread = Thread(target=updateStatus)
-    # statusThread.daemon = True
-    # statusThread.start()
+    statusThread = Thread(target=updateStatus)
+    statusThread.daemon = True
+    statusThread.start()
 
     # 1) Init a Thread pool with the desired number of threads
     pool = ThreadPool(_nThreads)
