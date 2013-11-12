@@ -60,7 +60,6 @@ _conf = {
         "DOE": "ch{channel:d}_DOE.dat"
     }
 }
-_currentStatusOutput = []
 
 
 # thread pool stuff
@@ -74,22 +73,52 @@ class Worker(mp.Process):
         self.tasks = tasks
         self.daemon = True
         self.name = "{0}".format(id)
+        self.status = WorkerStatus()
         self.start()
 
     def run(self):
         while True:
             func, args, kargs = self.tasks.get()
-            try: func(self.name, *args, **kargs)
+            try: func(self, *args, **kargs)
             except Exception, e: print e
             self.tasks.task_done()
+
+class WorkerStatus():
+    def __init__(self):
+        self.channel = mp.Value('i', -1)
+        self.step = mp.Value('i', 0)
+        self.progress = mp.Value('i', 0)
+        self.lock = mp.Lock()
+
+    def setChannel(self, c):
+        with self.lock:
+            self.channel.value = c
+
+    def setStep(self, s):
+        with self.lock:
+            self.step.value = s
+
+    def setProgress(self, p):
+        with self.lock:
+            self.progress.value = p
+
+    def getChannel(self):
+        return self.channel.value
+
+    def getStep(self):
+        return self.step.value
+
+    def getProgress(self):
+        return self.progress.value
 
 
 class ThreadPool:
     """Pool of threads consuming tasks from a queue"""
     def __init__(self, num_threads):
         self.tasks = mp.JoinableQueue(num_threads)
+        self.workers = []
         for i in range(num_threads):
-            Worker(self.tasks, i)
+            self.workers.append( Worker(self.tasks, i) )
 
     def add_task(self, func, *args, **kargs):
         """Add a task to the queue"""
@@ -227,15 +256,15 @@ def addEvent(signal, t0, height):
     return t
 
 
-def generateTrues(threadID, signal, runTime):
+def generateTrues(thread, signal, runTime):
     global _conf, _currentStatusOutput
     t = float(0)
     while True:
         t_wait = random.gammavariate(1.0, 1/_conf['eventRate'])
 
         progress = int(round(t / runTime * 100))
-        if progress > _currentStatusOutput[threadID]['%']:
-            _currentStatusOutput[threadID]['%'] = progress
+        if progress > thread.status.getProgress():
+            thread.status.setProgress(progress)
             time.sleep(0.001)   # give the output some time to print
 
         # time of the next event
@@ -254,7 +283,7 @@ def generateTrues(threadID, signal, runTime):
         t += t_wait
 
 
-def getDiscriminatorOutput(threadID, signal, channel):
+def getDiscriminatorOutput(thread, signal, channel):
     global _conf, _currentStatusOutput
 
     filenameDOT = _conf['directory'] + _conf['filename']['DOT'].format(channel=int(channel))
@@ -272,8 +301,8 @@ def getDiscriminatorOutput(threadID, signal, channel):
 
     while i < signal.getSteps():
         progress = int(round(float(i) / signal.getSteps() * 100))
-        if progress > _currentStatusOutput[threadID]['%']:
-            _currentStatusOutput[threadID]['%'] = progress
+        if progress > thread.status.getProgress():
+            thread.status.setProgress(progress)
             time.sleep(0.001)   # give the output some time to print
 
         t_ps = long(round(i * _conf['stepping'] * 1e12))   # t in ps
@@ -310,47 +339,45 @@ def getDiscriminatorOutput(threadID, signal, channel):
 
 
 # the actual generation of the events
-def generateChannelEvents(threadID, channel):
+def generateChannelEvents(thread, channel):
     global _conf, _currentStatusOutput, _runTime
 
-    threadID = int(threadID)
-    _currentStatusOutput[threadID]['ch'] = channel
+    thread.status.setChannel(channel)
 
     # init the signal objects
     nSteps = long((_runTime + 1e-6)/_conf['stepping'])
     discInput = Signal(nSteps)
 
     # generate the true hits
-    _currentStatusOutput[threadID]['%'] = 0
-    _currentStatusOutput[threadID]['step'] = 1
-    generateTrues(threadID, discInput, _runTime)
+    thread.status.setStep(1)
+    thread.status.setProgress(0)
+    generateTrues(thread, discInput, _runTime)
 
     # get the discriminator output
-    _currentStatusOutput[threadID]['%'] = 0
-    _currentStatusOutput[threadID]['step'] = 3
-    getDiscriminatorOutput(threadID, discInput, channel)
+    thread.status.setStep(3)
+    thread.status.setProgress(0)
+    getDiscriminatorOutput(thread, discInput, channel)
 
     # print "channel {0:2d}   generated Events: {1}".format(channel, discInput.getEvents())
 
 
 # Keep the status output up to date
-def updateStatus():
+def updateStatus(pool):
     while True:
-        printStatus()
+        printStatus(pool)
         time.sleep(0.03)
 
 
 # Print some status information to the command line
-def printStatus(lastOutput=False):
-    global _conf, _currentStatusOutput
+def printStatus(pool, lastOutput=False):
+    global _conf
 
     line = ""
-    for i in range(len(_currentStatusOutput)):
-        v = _currentStatusOutput[i]
-        if v['ch'] < 0:
+    for w in pool.workers:
+        if w.status.getChannel() < 0:
             line += " "*13 + "|"
         else:
-            line += " ch{0:02d} {1:d} {2:3d}% |".format(v['ch'], v['step'], v['%'])
+            line += " ch{0:02d} {1:d} {2:3d}% |".format(w.status.getChannel(), w.status.getStep(), w.status.getProgress())
 
     if lastOutput:
         sys.stdout.write(line[:-1])
@@ -377,7 +404,7 @@ def printHeader():
     statusOutputHeadline = ""
     for t in range(_nThreads):
         statusOutputHeadline += "   task {0:2d}   |".format(t)
-        _currentStatusOutput.append({'ch': -1, '%': 0.0})
+        # _currentStatusOutput.append({'ch': -1, '%': 0.0})
     print statusOutputHeadline[:-3]
     print (("-"*13 + "+")*_nThreads)[:-1]
 
@@ -396,7 +423,6 @@ def printUsage():
 # the main function
 def main():
     global _conf, _runTime, _nThreads, _maxThreads, _nChannels
-    global _currentStatusOutput
 
     if 2 <= len(sys.argv) <= 3:
         if len(sys.argv) >= 3:
@@ -416,19 +442,19 @@ def main():
     if _nThreads == 0 or _nThreads > _maxThreads:
         _nThreads = _maxThreads
 
-    # information for the user
-    printHeader()
-    # statusThread = mp.Process(target=updateStatus)
-    # statusThread.daemon = True
-    # statusThread.start()
-
     # 1) Init a Thread pool with the desired number of threads
     pool = ThreadPool(_nThreads)
+
+    # information for the user
+    printHeader()
+    statusThread = mp.Process(target=updateStatus, args=(pool,))
+    statusThread.daemon = True
+    statusThread.start()
 
     for ch in range(_nChannels):
         # 2) Add the task to the queue
         pool.add_task(generateChannelEvents, ch)
-        # printStatus()
+        # printStatus(pool)
 
     # 3) Wait for completion
     pool.wait_completion()
