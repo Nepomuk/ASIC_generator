@@ -32,7 +32,7 @@ _nThreads = 0
 
 
 # other global values
-_nChannels = 64
+_nChannels = 6
 _conf = {
     "eventRate": 160e3, # Hz
     "darkRate": 1e6,    # Hz
@@ -48,9 +48,9 @@ _conf = {
     "maxD1": 1.5e-9,    # s
     "maxD2": 400e-9,    # s
 
-    "stepping": 1e-11,  # s
+    "stepping": 1e-10,  # s
 
-    "enableSaving": True,
+    "enableSaving": False,
     "directory": "asic_data_{time:.0f}ms/",  # include trailing slash!
     "filename": {
         "stats": "ch{channel:d}_DOT.dat",
@@ -64,19 +64,16 @@ _currentStatusOutput = []
 
 
 # thread pool stuff
-from Queue import Queue
-from threading import Thread
+import multiprocessing as mp
+_maxThreads = mp.cpu_count()
 
-from multiprocessing import cpu_count
-_maxThreads = cpu_count()
-
-class Worker(Thread):
+class Worker(mp.Process):
     """Thread executing tasks from a given tasks queue"""
     def __init__(self, tasks, id):
-        Thread.__init__(self)
+        mp.Process.__init__(self)
         self.tasks = tasks
         self.daemon = True
-        self.name = id
+        self.name = "{0}".format(id)
         self.start()
 
     def run(self):
@@ -90,7 +87,7 @@ class Worker(Thread):
 class ThreadPool:
     """Pool of threads consuming tasks from a queue"""
     def __init__(self, num_threads):
-        self.tasks = Queue(num_threads)
+        self.tasks = mp.JoinableQueue(num_threads)
         for i in range(num_threads):
             Worker(self.tasks, i)
 
@@ -313,24 +310,24 @@ def getDiscriminatorOutput(threadID, signal, channel):
 
 
 # the actual generation of the events
-def generateChannelEvents(threadID, runTime, channel):
-    global _conf, _currentStatusOutput
+def generateChannelEvents(threadID, channel):
+    global _conf, _currentStatusOutput, _runTime
 
     threadID = int(threadID)
     _currentStatusOutput[threadID]['ch'] = channel
 
     # init the signal objects
-    nSteps = long((runTime + 1e-6)/_conf['stepping'])
+    nSteps = long((_runTime + 1e-6)/_conf['stepping'])
     discInput = Signal(nSteps)
 
     # generate the true hits
     _currentStatusOutput[threadID]['%'] = 0
     _currentStatusOutput[threadID]['step'] = 1
-    generateTrues(threadID, discInput, runTime)
+    generateTrues(threadID, discInput, _runTime)
 
     # get the discriminator output
     _currentStatusOutput[threadID]['%'] = 0
-    _currentStatusOutput[threadID]['step'] = 2
+    _currentStatusOutput[threadID]['step'] = 3
     getDiscriminatorOutput(threadID, discInput, channel)
 
     # print "channel {0:2d}   generated Events: {1}".format(channel, discInput.getEvents())
@@ -421,16 +418,17 @@ def main():
 
     # information for the user
     printHeader()
-    statusThread = Thread(target=updateStatus)
-    statusThread.daemon = True
-    statusThread.start()
+    # statusThread = mp.Process(target=updateStatus)
+    # statusThread.daemon = True
+    # statusThread.start()
 
     # 1) Init a Thread pool with the desired number of threads
     pool = ThreadPool(_nThreads)
 
     for ch in range(_nChannels):
         # 2) Add the task to the queue
-        pool.add_task(generateChannelEvents, _runTime, ch)
+        pool.add_task(generateChannelEvents, ch)
+        # printStatus()
 
     # 3) Wait for completion
     pool.wait_completion()
