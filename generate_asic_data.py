@@ -48,9 +48,9 @@ _conf = {
     "maxD1": 1.5e-9,    # s
     "maxD2": 400e-9,    # s
 
-    "stepping": 1e-9,  # s
+    "stepping": 1e-11,  # s
 
-    "enableSaving": False,
+    "enableSaving": True,
     "directory": "asic_data_{time:.0f}ms/",  # include trailing slash!
     "filename": {
         "stats": "ch{channel:d}_DOT.dat",
@@ -257,6 +257,12 @@ def addEvent(signal, t0, height):
 
 
 def generateTrues(thread, signal):
+    channel = thread.status.getChannel()
+    filenameTrues = _conf['directory'] + _conf['filename']['trues'].format(channel=int(channel))
+
+    if _conf['enableSaving']:
+        fileTrues = file(filenameTrues, 'w')
+
     t = float(0)
     while True:
         t_wait = random.gammavariate(1.0, 1/_conf['eventRate'])
@@ -276,10 +282,17 @@ def generateTrues(thread, signal):
         #print "generate event at t={0} with heigth {1}".format(t,height)
         length = addEvent(signal, t_next, height)
 
+        # write to file
+        if _conf['enableSaving']:
+            fileTrues.write("{0:.12f} {1:.12f}\n".format(t, length))
+
         # time for the next event
         if length > t_wait:
             t += length # fix pile-up
         t += t_wait
+
+    if _conf['enableSaving']:
+        fileTrues.close()
 
 
 def getDiscriminatorOutput(thread, signal):
@@ -353,6 +366,7 @@ def generateChannelEvents(thread, channel):
     thread.status.setStep(3)
     thread.status.setProgress(0)
     getDiscriminatorOutput(thread, discInput)
+    thread.status.setProgress(100)
 
     # print "channel {0:2d}   generated Events: {1}".format(channel, discInput.getEvents())
 
@@ -449,6 +463,7 @@ def main():
 
     # 3) Wait for completion
     pool.wait_completion()
+    printStatus(pool)
 
     print "\n\nEverything done!"
 
