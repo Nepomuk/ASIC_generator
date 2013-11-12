@@ -32,7 +32,7 @@ _nThreads = 0
 
 
 # other global values
-_nChannels = 6
+_nChannels = 64
 _conf = {
     "eventRate": 160e3, # Hz
     "darkRate": 1e6,    # Hz
@@ -48,7 +48,7 @@ _conf = {
     "maxD1": 1.5e-9,    # s
     "maxD2": 400e-9,    # s
 
-    "stepping": 1e-10,  # s
+    "stepping": 1e-9,  # s
 
     "enableSaving": False,
     "directory": "asic_data_{time:.0f}ms/",  # include trailing slash!
@@ -256,20 +256,19 @@ def addEvent(signal, t0, height):
     return t
 
 
-def generateTrues(thread, signal, runTime):
-    global _conf, _currentStatusOutput
+def generateTrues(thread, signal):
     t = float(0)
     while True:
         t_wait = random.gammavariate(1.0, 1/_conf['eventRate'])
 
-        progress = int(round(t / runTime * 100))
+        progress = int(round(t / _runTime * 100))
         if progress > thread.status.getProgress():
             thread.status.setProgress(progress)
             time.sleep(0.001)   # give the output some time to print
 
         # time of the next event
         t_next = t + t_wait
-        if t_next > runTime:
+        if t_next > _runTime:
             break
 
         # generate pulse
@@ -283,9 +282,8 @@ def generateTrues(thread, signal, runTime):
         t += t_wait
 
 
-def getDiscriminatorOutput(thread, signal, channel):
-    global _conf, _currentStatusOutput
-
+def getDiscriminatorOutput(thread, signal):
+    channel = thread.status.getChannel()
     filenameDOT = _conf['directory'] + _conf['filename']['DOT'].format(channel=int(channel))
     filenameDOE = _conf['directory'] + _conf['filename']['DOE'].format(channel=int(channel))
 
@@ -340,8 +338,6 @@ def getDiscriminatorOutput(thread, signal, channel):
 
 # the actual generation of the events
 def generateChannelEvents(thread, channel):
-    global _conf, _currentStatusOutput, _runTime
-
     thread.status.setChannel(channel)
 
     # init the signal objects
@@ -351,12 +347,12 @@ def generateChannelEvents(thread, channel):
     # generate the true hits
     thread.status.setStep(1)
     thread.status.setProgress(0)
-    generateTrues(thread, discInput, _runTime)
+    generateTrues(thread, discInput)
 
     # get the discriminator output
     thread.status.setStep(3)
     thread.status.setProgress(0)
-    getDiscriminatorOutput(thread, discInput, channel)
+    getDiscriminatorOutput(thread, discInput)
 
     # print "channel {0:2d}   generated Events: {1}".format(channel, discInput.getEvents())
 
@@ -370,8 +366,6 @@ def updateStatus(pool):
 
 # Print some status information to the command line
 def printStatus(pool, lastOutput=False):
-    global _conf
-
     line = ""
     for w in pool.workers:
         if w.status.getChannel() < 0:
@@ -387,8 +381,6 @@ def printStatus(pool, lastOutput=False):
 
 
 def printHeader():
-    global _conf, _nThreads, _runTime
-
     # some general description
     print "Generating events for {0:.0f} ms with a stepping of {1:.1e} s.\n".format(_runTime*1000, _conf['stepping'])
     print "Status output for each task:"
@@ -404,7 +396,6 @@ def printHeader():
     statusOutputHeadline = ""
     for t in range(_nThreads):
         statusOutputHeadline += "   task {0:2d}   |".format(t)
-        # _currentStatusOutput.append({'ch': -1, '%': 0.0})
     print statusOutputHeadline[:-3]
     print (("-"*13 + "+")*_nThreads)[:-1]
 
@@ -422,7 +413,7 @@ def printUsage():
 
 # the main function
 def main():
-    global _conf, _runTime, _nThreads, _maxThreads, _nChannels
+    global _conf, _runTime, _nThreads
 
     if 2 <= len(sys.argv) <= 3:
         if len(sys.argv) >= 3:
