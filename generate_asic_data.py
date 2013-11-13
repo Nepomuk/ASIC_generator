@@ -43,11 +43,15 @@ _nThreads = 0
 # other global values
 _nChannels = 64
 _conf = {
+    # simulation parameters
+    "stepping": 1e-11,  # s
+
     "eventRate": 160e3, # Hz
     "darkRate": 1e6,    # Hz
     "tThreshold": 0.5,  # mV
     "eThreshold": 10,   # mV
 
+    # pulse shape parameters (without meaning yet)
     "tPeakT": 1e-9,
     "alphaT": 1.0,
     "tPeakE": 4.0,
@@ -57,9 +61,8 @@ _conf = {
     "maxD1": 1.5e-9,    # s
     "maxD2": 400e-9,    # s
 
-    "stepping": 1e-11,  # s
-
-    "enableSaving": True,
+    # output parameters
+    "enableSaving": True,   # disable saving the output, more for debugging
     "directory": "asic_data_{time:.0f}ms/",  # include trailing slash!
     "filename": {
         "stats": "ch{channel:d}_DOT.dat",
@@ -67,7 +70,7 @@ _conf = {
         "dark": "ch{channel:d}_dark.dat",
         "DOT": "ch{channel:d}_DOT.dat",
         "DOE": "ch{channel:d}_DOE.dat"
-    }
+    },
 }
 
 
@@ -295,12 +298,11 @@ def generateTrues(thread, signal):
 
         # generate pulse
         height = random.uniform(1.0, 30.0)
-        #print "generate event at t={0} with heigth {1}".format(t,height)
         length = addEvent(signal, t_next, height)
 
         # write to file
         if _conf['enableSaving']:
-            fileTrues.write("{0:.12f} {1:.12f}\n".format(t, length))
+            fileTrues.write("{0:.12f} {1:.12f}\n".format(t_next, length))
 
         # time for the next event
         if length > t_wait:
