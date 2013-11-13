@@ -9,17 +9,26 @@
 #  Author:  André Goerres (a.goerres@fz-juelich.de)
 #  Created: 2013-11-08
 #
-#  Description:
+#  Usage:  python generate_asic_data.py <time [ms]> [<number_of_threads>]
 #
-#  Revisions:
-#    1.0 Initial revision
+#    <time [ms]>            The time span to generate in milliseconds.
+#    <number_of_threads>    (Optional) Number of threads to use.
+#                           Default: number of CPUs
+#
+#  Description:  With this script you can generate yourself some input for the
+#    digital simulation of the TOFPET/PASTA ASICs. The generator creates event
+#    and dark count pulses with the given parameters. Using the resulting course
+#    of voltage, the discriminator decision is simulated. For every change in
+#    the discriminator's output, the time difference since the last change is
+#    saved in a file (DOT/DOE files). Lateron in the simulation, these time
+#    values are used as wait times, until the discriminator value should be
+#    changed.
 #
 # ------------------------------------------------------------------------------
 
 # Import stuff
 import sys          # system functions (like exit)
 import time         # time functions
-import re           # regular expressions
 import os           # some useful functions for files
 import random       # for pseudo-random numbers
 import math         # you know, the math magic
@@ -84,6 +93,7 @@ class Worker(mp.Process):
             self.tasks.task_done()
 
 class WorkerStatus():
+    """Manage the worker's status in shared memory values"""
     def __init__(self):
         self.channel = mp.Value('i', -1)
         self.step = mp.Value('i', 0)
@@ -196,6 +206,10 @@ class Signal:
     def getEvents(self):
         return self._nEvents
 
+    # Search the next event from a given point onwards. Because the separation
+    # of the data into blocks is only known internally in the class, this helps
+    # the user to not have to loop in small steps over a long period of
+    # nothingness.
     def searchNextFrom(self, i, thr):
         if 0 <= i < self._nSteps:
             iBlock = long(i / self._blockSize)
@@ -226,11 +240,11 @@ class Signal:
             return False
 
 
-
+# Generate the pulse shape of one event. The function right now is an overlay of
+# a quadratic factor (x^2) and an exponential factor (exp(-x)). In a future
+# version this will be adapted to the simulated output of the preamplifier,
+# resulting in a realistig pulse shape.
 def addEvent(signal, t0, height):
-    #           x ** (alpha - 1) * math.exp(-x / beta)
-    # pdf(x) =  --------------------------------------
-    #             math.gamma(alpha) * beta ** alpha
     iBin0 = long(t0 / _conf['stepping'])
     iBin = iBin0
 
@@ -256,6 +270,8 @@ def addEvent(signal, t0, height):
     return t
 
 
+# Generate the event pulses (= trues) with a random interval in between two
+# pulses. The parameter of one pulse is also chosen randomly.
 def generateTrues(thread, signal):
     channel = thread.status.getChannel()
     filenameTrues = _conf['directory'] + _conf['filename']['trues'].format(channel=int(channel))
@@ -295,6 +311,9 @@ def generateTrues(thread, signal):
         fileTrues.close()
 
 
+# Take course of voltage and generate the discriminator's output from that. As
+# an output, only the time difference between changes of the DOx states are
+# saved. These times are used lateron as wait times.
 def getDiscriminatorOutput(thread, signal):
     channel = thread.status.getChannel()
     filenameDOT = _conf['directory'] + _conf['filename']['DOT'].format(channel=int(channel))
@@ -416,11 +435,11 @@ def printHeader():
 
 # How the program is intended to use
 def printUsage():
-    print "Usage: generate_asic_data.py <time> [<cores>]"
+    print "Usage: generate_asic_data.py <time [ms]> [<threads>]"
     print ""
     print "Parameter:"
-    print "  time       The simulated time of events in seconds."
-    print "  cores      Number of CPU cores to use. Default: max"
+    print "  time       The simulated time of events in milliseconds."
+    print "  threads    Number of CPU cores to use. Default: max"
     print ""
     sys.exit()
 
@@ -429,16 +448,18 @@ def printUsage():
 def main():
     global _conf, _runTime, _nThreads
 
+    # get the input data
     if 2 <= len(sys.argv) <= 3:
         if len(sys.argv) >= 3:
             if int(sys.argv[2]) > 0:
                 _nThreads = int(sys.argv[2])
 
-        _runTime = float(sys.argv[1])
+        _runTime = float(sys.argv[1]) / 1000.0
     else:
         printUsage()
         sys.exit()
 
+    # set output directory based on runtime
     _conf['directory'] = _conf['directory'].format(time=_runTime*1000)
     if not os.path.exists(_conf['directory']) and _conf['enableSaving']:
         os.makedirs(_conf['directory'])
