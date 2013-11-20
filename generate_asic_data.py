@@ -44,7 +44,7 @@ _nThreads = 0
 _nChannels = 64
 _conf = {
     # simulation parameters
-    "stepping": 1e-11,  # s
+    "stepping": 1e-10,  # s
 
     "eventRate": 160e3, # Hz
     "darkRate": 1e6,    # Hz
@@ -461,6 +461,9 @@ def main():
         printUsage()
         sys.exit()
 
+    # stop the time
+    startTime = time.time()
+
     # set output directory based on runtime
     _conf['directory'] = _conf['directory'].format(time=_runTime*1000)
     if not os.path.exists(_conf['directory']) and _conf['enableSaving']:
@@ -488,7 +491,13 @@ def main():
     pool.wait_completion()
     printStatus(pool)
 
-    print "\n\nEverything done!"
+    # stop the timer
+    stopTime = time.time()
+    totalTime = stopTime - startTime
+    totalTimeSec = totalTime % 60
+    totalTimeMin = int((totalTime - totalTimeSec) / 60)
+    print "\n\nEvent generation finished after {0:02d}:{1:04.1f} min:sec.".format(totalTimeMin, totalTimeSec)
+    print "Good bye and thanks for all the patience!"
 
 
 if __name__ == '__main__':
