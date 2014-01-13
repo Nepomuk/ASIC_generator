@@ -46,8 +46,10 @@ _conf = {
     # simulation parameters
     "stepping": 1e-10,  # s
 
-    "eventRate": 160e3, # Hz
-    "darkRate": 1e6,    # Hz
+    "eventRate": {
+        "trues": 160e3, # Hz
+        "dark": 1e6,    # Hz
+    },
     "tThreshold": 0.5,  # mV
     "eThreshold": 10,   # mV
 
@@ -275,16 +277,19 @@ def addEvent(signal, t0, height):
 
 # Generate the event pulses (= trues) with a random interval in between two
 # pulses. The parameter of one pulse is also chosen randomly.
-def generateTrues(thread, signal):
+def generateHits(thread, signal, eventType):
+    if eventType != 'trues' or eventType != 'dark':
+        return
+
     channel = thread.status.getChannel()
-    filenameTrues = _conf['directory'] + _conf['filename']['trues'].format(channel=int(channel))
+    fileName = _conf['directory'] + _conf['filename'][eventType].format(channel=int(channel))
 
     if _conf['enableSaving']:
-        fileTrues = file(filenameTrues, 'w')
+        f = file(fileName, 'w')
 
     t = float(0)
     while True:
-        t_wait = random.gammavariate(1.0, 1/_conf['eventRate'])
+        t_wait = random.gammavariate(1.0, 1/_conf['eventRate'][eventType])
 
         progress = int(round(t / _runTime * 100))
         if progress > thread.status.getProgress():
@@ -297,12 +302,12 @@ def generateTrues(thread, signal):
             break
 
         # generate pulse
-        height = random.uniform(1.0, 30.0)
+        height = random.uniform(3.0, 30.0) if (eventType == 'trues') else 1.0
         length = addEvent(signal, t_next, height)
 
         # write to file
         if _conf['enableSaving']:
-            fileTrues.write("{0:.12f} {1:.12f}\n".format(t_next, length))
+            f.write("{0:.12f} {1:.12f}\n".format(t_next, length))
 
         # time for the next event
         if length > t_wait:
@@ -310,7 +315,7 @@ def generateTrues(thread, signal):
         t += t_wait
 
     if _conf['enableSaving']:
-        fileTrues.close()
+        f.close()
 
 
 # Take course of voltage and generate the discriminator's output from that. As
@@ -381,7 +386,12 @@ def generateChannelEvents(thread, channel):
     # generate the true hits
     thread.status.setStep(1)
     thread.status.setProgress(0)
-    generateTrues(thread, discInput)
+    generateTrues(thread, discInput, 'trues')
+
+    # generate the dark hits
+    thread.status.setStep(2)
+    thread.status.setProgress(0)
+    generateTrues(thread, discInput, 'dark')
 
     # get the discriminator output
     thread.status.setStep(3)
