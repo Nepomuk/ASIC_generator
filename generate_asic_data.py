@@ -33,6 +33,7 @@ import os           # some useful functions for files
 import random       # for pseudo-random numbers
 import math         # you know, the math magic
 import array        # we store the data in arrays
+import csv          # parse the input file
 
 
 # default values
@@ -44,7 +45,7 @@ _nThreads = 0
 _nChannels = 64
 _conf = {
     # simulation parameters
-    "stepping": 1e-10,  # s
+    "stepping": 1e-9,  # s
 
     "eventRate": {
         "trues": 160e3, # Hz
@@ -53,18 +54,18 @@ _conf = {
     "tThreshold": 0.5,  # mV
     "eThreshold": 10,   # mV
 
-    # pulse shape parameters (without meaning yet)
-    "tPeakT": 1e-9,
-    "alphaT": 1.0,
-    "tPeakE": 4.0,
-    "alphaE": 0.5,
-
-    "maxToT": 400e-9,   # s
-    "maxD1": 1.5e-9,    # s
-    "maxD2": 400e-9,    # s
+    # pulse shape
+    "useSimulationInput": True,  # setting False uses comb. of x^2 and exp(-x)
+    "simulationInputFiles": {
+        "neg": "input_pulse/NegativePolarity.csv",
+        "pos": "input_pulse/PositivePolarity.csv",
+        "minCharge": 1,     # fC
+        "stepping": 1,      # fC
+    },
+    "polarity": "neg",      # possible values: pos, neg
 
     # output parameters
-    "enableSaving": True,   # disable saving the output, more for debugging
+    "enableSaving": False,   # disable saving the output, more for debugging
     "directory": "asic_data_{time:.0f}ms/",  # include trailing slash!
     "filename": {
         "stats": "ch{channel:d}_DOT.dat",
@@ -245,25 +246,75 @@ class Signal:
             return False
 
 
+class PulseShape:
+    def __init__(self, useSimInput, inputFile):
+        self.useSimInput = useSimInput
+        self.shape = {}
+        self.minCharge = _conf['simulationInputFiles']['minCharge']
+        self.maxCharge = _conf['simulationInputFiles']['minCharge']
+
+        if useSimInput:
+            self.loadCSV(inputFile)
+
+    def loadCSV(self, csvFileName):
+        with open(csvFileName, 'rb') as csvFile:
+            reader = csv.reader(csvFile, delimiter=',')
+            firstrow = True
+            for row in reader:
+                # skip first row (header)
+                if firstrow:
+                    firstrow = False
+                    continue
+
+                for i in range(len(row)/2):
+                    time = row[2*i]
+                    voltage = row[2*i+1]
+                    if len(time.strip()) == 0 or len(voltage.strip()) == 0:
+                        continue
+
+                    curCharge = _conf['simulationInputFiles']['minCharge'] + i*_conf['simulationInputFiles']['stepping']
+                    if not curCharge in self.shape:
+                        self.shape[curCharge] = { 't': [], 'V': [] }
+                    if curCharge > self.maxCharge:
+                        self.maxCharge = curCharge
+
+                    self.shape[curCharge]['t'].append(time)
+                    self.shape[curCharge]['V'].append(voltage)
+            self.datapoints = sum([len(v['t']) for k,v in self.shape.iteritems()])
+
+    def addEvent(self, signal, charge, t0):
+        charge = round(charge)
+        if charge < self.minCharge:
+            charge = self.minCharge
+        elif charge > self.maxCharge:
+            charge = self.maxCharge
+        if not charge in self.shape:
+            return
+
+        pulse = self.shape[charge]
+        minTime = pulse['t'][0]
+        return pulse['t'][-1]
+
+
 # Generate the pulse shape of one event. The function right now is an overlay of
 # a quadratic factor (x^2) and an exponential factor (exp(-x)). In a future
 # version this will be adapted to the simulated output of the preamplifier,
 # resulting in a realistig pulse shape.
-def addEvent(signal, t0, height):
+def addEvent(signal, t0, charge):
     iBin0 = long(t0 / _conf['stepping'])
     iBin = iBin0
 
     while True:
         t = float(iBin - iBin0) * _conf['stepping']    # t in s
-        x = t * 1e9 / height
-        currentValue = height * 25 * x**2 * math.exp(-x)
+        x = t * 1e9 / charge
+        currentValue = charge * 25 * x**2 * math.exp(-x)
 
         # if it couldn't be set, it is probably out of range
         if not signal.setValue(iBin, currentValue):
             break
 
         iBin += 1
-        # regular stop criterium
+        # regular stop criterion
         if t > 1e-9 and currentValue < _conf['tThreshold']:
             break
 
@@ -277,8 +328,8 @@ def addEvent(signal, t0, height):
 
 # Generate the event pulses (= trues) with a random interval in between two
 # pulses. The parameter of one pulse is also chosen randomly.
-def generateHits(thread, signal, eventType):
-    if eventType != 'trues' or eventType != 'dark':
+def generateHits(thread, signal, pulse, eventType):
+    if eventType != 'trues' and eventType != 'dark':
         return
 
     channel = thread.status.getChannel()
@@ -302,8 +353,10 @@ def generateHits(thread, signal, eventType):
             break
 
         # generate pulse
-        height = random.uniform(3.0, 30.0) if (eventType == 'trues') else 1.0
-        length = addEvent(signal, t_next, height)
+        fC = random.uniform(3.0, 30.0) if eventType == 'trues' else 0.5
+        length = addEvent(signal, t_next, fC)
+        if eventType == 'trues':
+            length = pulse.addEvent(signal, fC, t_next)
 
         # write to file
         if _conf['enableSaving']:
@@ -376,7 +429,7 @@ def getDiscriminatorOutput(thread, signal):
 
 
 # the actual generation of the events
-def generateChannelEvents(thread, channel):
+def generateChannelEvents(thread, channel, pulse):
     thread.status.setChannel(channel)
 
     # init the signal objects
@@ -386,12 +439,12 @@ def generateChannelEvents(thread, channel):
     # generate the true hits
     thread.status.setStep(1)
     thread.status.setProgress(0)
-    generateTrues(thread, discInput, 'trues')
+    generateHits(thread, discInput, pulse, 'trues')
 
     # generate the dark hits
     thread.status.setStep(2)
     thread.status.setProgress(0)
-    generateTrues(thread, discInput, 'dark')
+    generateHits(thread, discInput, pulse, 'dark')
 
     # get the discriminator output
     thread.status.setStep(3)
@@ -474,6 +527,10 @@ def main():
     # stop the time
     startTime = time.time()
 
+    # load the input pulse from an output of a simulation
+    inputFile = _conf['simulationInputFiles'][_conf['polarity']]
+    pulse = PulseShape(_conf['useSimulationInput'], inputFile)
+
     # set output directory based on runtime
     _conf['directory'] = _conf['directory'].format(time=_runTime*1000)
     if not os.path.exists(_conf['directory']) and _conf['enableSaving']:
@@ -487,19 +544,19 @@ def main():
     pool = ThreadPool(_nThreads)
 
     # information for the user
-    printHeader()
-    statusThread = mp.Process(target=updateStatus, args=(pool,))
-    statusThread.daemon = True
-    statusThread.start()
+    # printHeader()
+    # statusThread = mp.Process(target=updateStatus, args=(pool,))
+    # statusThread.daemon = True
+    # statusThread.start()
 
     for ch in range(_nChannels):
         # 2) Add the task to the queue
-        pool.add_task(generateChannelEvents, ch)
+        pool.add_task(generateChannelEvents, ch, pulse)
         # printStatus(pool)
 
     # 3) Wait for completion
     pool.wait_completion()
-    printStatus(pool)
+    # printStatus(pool)
 
     # stop the timer
     stopTime = time.time()
