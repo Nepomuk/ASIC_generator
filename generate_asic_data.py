@@ -42,17 +42,20 @@ _nThreads = 0
 
 
 # other global values
-_nChannels = 64
+_nChannels = 8
 _conf = {
     # simulation parameters
     "stepping": 1e-9,  # s
 
     "eventRate": {
-        "trues": 160e3, # Hz
-        "dark": 1e6,    # Hz
+        "trues": 160e3,  # Hz
+        "dark":    1e6,  # Hz
     },
-    "tThreshold": 0.5,  # mV
-    "eThreshold": 10,   # mV
+    "tThreshold":  1e-3, # V
+    "eThreshold": 10e-3, # V
+
+    "chargeDistAlpha": 2, # shape of the distribution (gamma distribution)
+    "chargeDistBeta":  5, # maximum of distribution (in fC)
 
     # pulse shape
     "useSimulationInput": True,  # setting False uses comb. of x^2 and exp(-x)
@@ -65,7 +68,7 @@ _conf = {
     "polarity": "neg",      # possible values: pos, neg
 
     # output parameters
-    "enableSaving": False,   # disable saving the output, more for debugging
+    "enableSaving": True,   # disable saving the output, more for debugging
     "directory": "asic_data_{time:.0f}ms/",  # include trailing slash!
     "filename": {
         "stats": "ch{channel:d}_DOT.dat",
@@ -179,9 +182,9 @@ class Signal:
 
     # add a value to a certain data point
     def addValue(self, i, value):
-        if 0 <= i < self.nSteps:
+        if 0 <= i < self._nSteps:
             oldValue = self.getValue(i)
-            if not oldValue:
+            if oldValue is None:
                 return False
             else:
                 return self.setValue(i, value + oldValue)
@@ -194,14 +197,14 @@ class Signal:
             iBlock = int(i / self._blockSize)
             iSlot = i % self._blockSize   # slot inside block
 
-            if self._data[iBlock] == None:
+            if self._data[iBlock] is None:
                 return 0.0
             elif len(self._data[iBlock]) == self._blockSize:
                 return self._data[iBlock][iSlot]
             else:
-                return False
+                return None
         else:
-            return False
+            return None
 
     def getSteps(self):
         return self._nSteps
@@ -250,6 +253,7 @@ class PulseShape:
     def __init__(self, useSimInput, inputFile):
         self.useSimInput = useSimInput
         self.shape = {}
+        self.cutoff = 0
         self.minCharge = _conf['simulationInputFiles']['minCharge']
         self.maxCharge = _conf['simulationInputFiles']['minCharge']
 
@@ -267,63 +271,106 @@ class PulseShape:
                     continue
 
                 for i in range(len(row)/2):
-                    time = row[2*i]
-                    voltage = row[2*i+1]
-                    if len(time.strip()) == 0 or len(voltage.strip()) == 0:
+                    if len(row[2*i].strip()) == 0 or len(row[2*i+1].strip()) == 0:
                         continue
+                    t = float(row[2*i])
+                    V = float(row[2*i+1])
+                    if self.cutoff == 0:
+                        self.cutoff = V + 0.0002
+                        continue
+                    elif V <= self.cutoff:
+                        continue
+                    V_corr = V - self.cutoff
 
                     curCharge = _conf['simulationInputFiles']['minCharge'] + i*_conf['simulationInputFiles']['stepping']
-                    if not curCharge in self.shape:
-                        self.shape[curCharge] = { 't': [], 'V': [] }
                     if curCharge > self.maxCharge:
                         self.maxCharge = curCharge
 
-                    self.shape[curCharge]['t'].append(time)
-                    self.shape[curCharge]['V'].append(voltage)
+                    if not curCharge in self.shape:
+                        self.shape[curCharge] = { 't': [], 'V': [], 't-offset': t }
+                        t_rel = 0.0
+                    else:
+                        t_rel = t - self.shape[curCharge]['t-offset']
+
+                    self.shape[curCharge]['t'].append(t_rel)
+                    self.shape[curCharge]['V'].append(V_corr)
             self.datapoints = sum([len(v['t']) for k,v in self.shape.iteritems()])
 
-    def addEvent(self, signal, charge, t0):
+    def selectPulse(self, charge):
         charge = round(charge)
         if charge < self.minCharge:
             charge = self.minCharge
         elif charge > self.maxCharge:
             charge = self.maxCharge
         if not charge in self.shape:
+            return None
+
+        return self.shape[charge]
+
+    # generate pulses based on simulation output files
+    def addEvent(self, signal, charge, t0):
+        pulse = self.selectPulse(charge)
+        if pulse is None:
             return
 
-        pulse = self.shape[charge]
-        minTime = pulse['t'][0]
+        iBin0 = long(t0 / _conf['stepping'])
+        iBin = iBin0
+        simTimeNextIndex = 0
+        while True:
+            t = float(iBin - iBin0) * _conf['stepping']    # t in s
+            for i in range(simTimeNextIndex, len(pulse['t'])):
+                if pulse['t'][i] > t:
+                    simTimeNextIndex = i
+                    simTimePrevIndex = i
+                    simTimeNext = pulse['t'][i]
+                    simTimePrev = pulse['t'][i-1]
+                    break
+
+            # do some linear interpolation to get a better estimation of the voltage
+            ratio = (t - simTimePrev) / (simTimeNext - simTimePrev)
+            voltageEstimate = (pulse['V'][simTimeNextIndex] - pulse['V'][simTimePrevIndex]) * ratio + pulse['V'][simTimePrevIndex]
+
+            # if it couldn't be set, it is probably out of range
+            if not signal.addValue(iBin, voltageEstimate):
+                break
+
+            iBin += 1
+            # stop, when time is larger than pulse length
+            if t >= pulse['t'][-1]:
+                break
+
         return pulse['t'][-1]
+
 
 
 # Generate the pulse shape of one event. The function right now is an overlay of
 # a quadratic factor (x^2) and an exponential factor (exp(-x)). In a future
 # version this will be adapted to the simulated output of the preamplifier,
 # resulting in a realistig pulse shape.
-def addEvent(signal, t0, charge):
-    iBin0 = long(t0 / _conf['stepping'])
-    iBin = iBin0
+# def addEvent(signal, t0, charge):
+#     iBin0 = long(t0 / _conf['stepping'])
+#     iBin = iBin0
 
-    while True:
-        t = float(iBin - iBin0) * _conf['stepping']    # t in s
-        x = t * 1e9 / charge
-        currentValue = charge * 25 * x**2 * math.exp(-x)
+#     while True:
+#         t = float(iBin - iBin0) * _conf['stepping']    # t in s
+#         x = t * 1e9 / charge
+#         currentValue = charge * 25 * x**2 * math.exp(-x)
 
-        # if it couldn't be set, it is probably out of range
-        if not signal.setValue(iBin, currentValue):
-            break
+#         # if it couldn't be set, it is probably out of range
+#         if not signal.setValue(iBin, currentValue):
+#             break
 
-        iBin += 1
-        # regular stop criterion
-        if t > 1e-9 and currentValue < _conf['tThreshold']:
-            break
+#         iBin += 1
+#         # regular stop criterion
+#         if t > 1e-9 and currentValue < _conf['tThreshold']:
+#             break
 
-        # pulses longer than 1 us don't make sense
-        if (t - t0) > 1e-6:
-            break
+#         # pulses longer than 1 us don't make sense
+#         if (t - t0) > 1e-6:
+#             break
 
-    signal.incrEventCounter()
-    return t
+#     signal.incrEventCounter()
+#     return t
 
 
 # Generate the event pulses (= trues) with a random interval in between two
@@ -352,15 +399,16 @@ def generateHits(thread, signal, pulse, eventType):
         if t_next > _runTime:
             break
 
-        # generate pulse
-        fC = random.uniform(3.0, 30.0) if eventType == 'trues' else 0.5
-        length = addEvent(signal, t_next, fC)
+        # generate pulse (maximum at 5 fC (=MIP))
         if eventType == 'trues':
-            length = pulse.addEvent(signal, fC, t_next)
+            fC = random.gammavariate(_conf['chargeDistAlpha'], _conf['chargeDistBeta'])
+        else:
+            fC = 1
+        length = pulse.addEvent(signal, fC, t_next)
 
         # write to file
         if _conf['enableSaving']:
-            f.write("{0:.12f} {1:.12f}\n".format(t_next, length))
+            f.write("{0:.12f} {1:06.3f}\n".format(t_next, fC))
 
         # time for the next event
         if length > t_wait:
