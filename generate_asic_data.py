@@ -42,7 +42,7 @@ _nThreads = 0
 
 
 # other global values
-_nChannels = 8
+_nChannels = 64
 _conf = {
     # simulation parameters
     "stepping": 1e-9,  # s
@@ -56,6 +56,8 @@ _conf = {
 
     "chargeDistAlpha": 2, # shape of the distribution (gamma distribution)
     "chargeDistBeta":  5, # maximum of distribution (in fC)
+
+    "darkPulseHeight": 4e-3, # V
 
     # pulse shape
     "useSimulationInput": True,  # setting False uses comb. of x^2 and exp(-x)
@@ -343,34 +345,28 @@ class PulseShape:
 
 
 
-# Generate the pulse shape of one event. The function right now is an overlay of
-# a quadratic factor (x^2) and an exponential factor (exp(-x)). In a future
-# version this will be adapted to the simulated output of the preamplifier,
-# resulting in a realistig pulse shape.
-# def addEvent(signal, t0, charge):
-#     iBin0 = long(t0 / _conf['stepping'])
-#     iBin = iBin0
+# Generate the pulse shape of one dark event. The function is an overlay of
+# a quadratic factor (x^2) and an exponential factor (exp(-x)).
+def addDarkPulse(signal, t0):
+    iBin0 = long(t0 / _conf['stepping'])
+    iBin = iBin0
 
-#     while True:
-#         t = float(iBin - iBin0) * _conf['stepping']    # t in s
-#         x = t * 1e9 / charge
-#         currentValue = charge * 25 * x**2 * math.exp(-x)
+    while True:
+        t = float(iBin - iBin0) * _conf['stepping']   # t in s
+        t_ns = t * 1e9  # t in ns
+        currentValue = _conf['darkPulseHeight']*1.85 * t_ns**2 * math.exp(-t_ns)
 
-#         # if it couldn't be set, it is probably out of range
-#         if not signal.setValue(iBin, currentValue):
-#             break
+        # if it couldn't be set, it is probably out of range
+        if not signal.setValue(iBin, currentValue):
+            break
 
-#         iBin += 1
-#         # regular stop criterion
-#         if t > 1e-9 and currentValue < _conf['tThreshold']:
-#             break
+        iBin += 1
+        # stop after 10 ns
+        if t_ns >= 10:
+            break
 
-#         # pulses longer than 1 us don't make sense
-#         if (t - t0) > 1e-6:
-#             break
-
-#     signal.incrEventCounter()
-#     return t
+    signal.incrEventCounter()
+    return t
 
 
 # Generate the event pulses (= trues) with a random interval in between two
@@ -402,9 +398,10 @@ def generateHits(thread, signal, pulse, eventType):
         # generate pulse (maximum at 5 fC (=MIP))
         if eventType == 'trues':
             fC = random.gammavariate(_conf['chargeDistAlpha'], _conf['chargeDistBeta'])
+            length = pulse.addEvent(signal, fC, t_next)
         else:
-            fC = 1
-        length = pulse.addEvent(signal, fC, t_next)
+            fC = 0.01;  # calculated integral, done with WolframAlpha (http://wolfr.am/1jJtxac)
+            length = addDarkPulse(signal, t_next)
 
         # write to file
         if _conf['enableSaving']:
@@ -592,19 +589,19 @@ def main():
     pool = ThreadPool(_nThreads)
 
     # information for the user
-    # printHeader()
-    # statusThread = mp.Process(target=updateStatus, args=(pool,))
-    # statusThread.daemon = True
-    # statusThread.start()
+    printHeader()
+    statusThread = mp.Process(target=updateStatus, args=(pool,))
+    statusThread.daemon = True
+    statusThread.start()
 
     for ch in range(_nChannels):
         # 2) Add the task to the queue
         pool.add_task(generateChannelEvents, ch, pulse)
-        # printStatus(pool)
+        printStatus(pool)
 
     # 3) Wait for completion
     pool.wait_completion()
-    # printStatus(pool)
+    printStatus(pool)
 
     # stop the timer
     stopTime = time.time()
