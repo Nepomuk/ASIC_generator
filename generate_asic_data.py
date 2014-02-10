@@ -45,7 +45,7 @@ _nThreads = 0
 _nChannels = 64
 _conf = {
     # simulation parameters
-    "stepping": 1e-9,  # s
+    "stepping": 5e-11,   # s
 
     "eventRate": {
         "trues": 160e3,  # Hz
@@ -278,7 +278,7 @@ class PulseShape:
                     t = float(row[2*i])
                     V = float(row[2*i+1])
                     if self.cutoff == 0:
-                        self.cutoff = V + 0.0002
+                        self.cutoff = V
                         continue
                     elif V <= self.cutoff:
                         continue
@@ -318,6 +318,9 @@ class PulseShape:
         iBin0 = long(t0 / _conf['stepping'])
         iBin = iBin0
         simTimeNextIndex = 0
+        lastEstimate = 0
+        t_thr = None
+
         while True:
             t = float(iBin - iBin0) * _conf['stepping']    # t in s
             for i in range(simTimeNextIndex, len(pulse['t'])):
@@ -336,13 +339,31 @@ class PulseShape:
             if not signal.addValue(iBin, voltageEstimate):
                 break
 
+            # get the time, when the threshold has been crossed
+            if t_thr == None and lastEstimate < _conf['tThreshold'] <= voltageEstimate:
+                # t_last = t - _conf['stepping']
+                # voltageRatio = (_conf['tThreshold'] - lastEstimate) / (voltageEstimate - lastEstimate)
+                # t_thr = t0 + t_last + voltageRatio * (t - t_last)
+                t_thr = t0 + t
+                # print "{0:.4f} {1:.4f} {2:.4f} {3:.2f}".format(lastEstimate, voltageEstimate, _conf['tThreshold'], voltageRatio)
+                # print "{0:.1e} {1:.3e} {2:.1e}".format(t_last, t_last+voltageRatio * (t - t_last), t)
+                # print
+
             iBin += 1
+            lastEstimate = voltageEstimate
+
             # stop, when time is larger than pulse length
             if t >= pulse['t'][-1]:
                 break
 
-        return pulse['t'][-1]
+        if t_thr == None:
+            t_thr = t0
 
+        return t_thr, pulse['t'][-1]
+
+
+def darkPulseValue(t_ns):
+    return _conf['darkPulseHeight']*1.85 * t_ns**2 * math.exp(-t_ns)
 
 
 # Generate the pulse shape of one dark event. The function is an overlay of
@@ -350,23 +371,36 @@ class PulseShape:
 def addDarkPulse(signal, t0):
     iBin0 = long(t0 / _conf['stepping'])
     iBin = iBin0
+    t_thr = None
 
     while True:
         t = float(iBin - iBin0) * _conf['stepping']   # t in s
         t_ns = t * 1e9  # t in ns
-        currentValue = _conf['darkPulseHeight']*1.85 * t_ns**2 * math.exp(-t_ns)
+        currentValue = darkPulseValue(t_ns)
+
+        # get the time, when the threshold is crossed (linear interpolation)
+        if t_thr == None and currentValue < _conf['tThreshold']:
+            t_next = t_ns + _conf['stepping']
+            nextValue = darkPulseValue(t_next*1e9)
+            if nextValue > _conf['tThreshold']:
+                # ratio = (_conf['tThreshold'] - currentValue) / (nextValue - currentValue)
+                # t_thr = t0+t + ratio * (t_next - t)
+                t_thr = t0 + t_next
 
         # if it couldn't be set, it is probably out of range
-        if not signal.setValue(iBin, currentValue):
+        if not signal.addValue(iBin, currentValue):
             break
 
         iBin += 1
-        # stop after 10 ns
-        if t_ns >= 10:
+        # stop after 20 ns
+        if t_ns >= 20:
             break
 
+    if t_thr == None:
+        t_thr = t0
+
     signal.incrEventCounter()
-    return t
+    return t_thr, t
 
 
 # Generate the event pulses (= trues) with a random interval in between two
@@ -383,6 +417,7 @@ def generateHits(thread, signal, pulse, eventType):
 
     t = float(0)
     while True:
+        saveThisEvent = True
         t_wait = random.gammavariate(1.0, 1/_conf['eventRate'][eventType])
 
         progress = int(round(t / _runTime * 100))
@@ -398,14 +433,16 @@ def generateHits(thread, signal, pulse, eventType):
         # generate pulse (maximum at 5 fC (=MIP))
         if eventType == 'trues':
             fC = random.gammavariate(_conf['chargeDistAlpha'], _conf['chargeDistBeta'])
-            length = pulse.addEvent(signal, fC, t_next)
+            t_thr, length = pulse.addEvent(signal, fC, t_next)
+            if fC < 2:
+                saveThisEvent = False
         else:
             fC = 0.01;  # calculated integral, done with WolframAlpha (http://wolfr.am/1jJtxac)
-            length = addDarkPulse(signal, t_next)
+            t_thr, length = addDarkPulse(signal, t_next)
 
         # write to file
-        if _conf['enableSaving']:
-            f.write("{0:.12f} {1:06.3f}\n".format(t_next, fC))
+        if _conf['enableSaving'] and saveThisEvent:
+            f.write("{0:.12f} {1:06.3f}\n".format(t_thr, fC))
 
         # time for the next event
         if length > t_wait:
