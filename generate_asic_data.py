@@ -49,9 +49,9 @@ _conf = {
 
     "eventRate": {
         "trues": 160e3,  # Hz
-        "dark":    1e6,  # Hz
+        "dark":      0,  # Hz
     },
-    "tThreshold":  1e-3, # V
+    "tThreshold": 10e-3, # V
     "eThreshold": 10e-3, # V
 
     "chargeDistAlpha": 2, # shape of the distribution (gamma distribution)
@@ -407,6 +407,10 @@ def addDarkPulse(signal, t0):
 # pulses. The parameter of one pulse is also chosen randomly.
 def generateHits(thread, signal, pulse, eventType):
     if eventType != 'trues' and eventType != 'dark':
+        return
+
+    # skip those with 0 rate (disable)
+    if _conf['eventRate'][eventType] == 0:
         return
 
     channel = thread.status.getChannel()
